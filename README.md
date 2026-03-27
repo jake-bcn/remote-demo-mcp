@@ -204,6 +204,19 @@ npm run dev
 npm run build && npm start
 ```
 
+Initialize config file:
+
+```bash
+remote-demo-mcp init
+```
+
+It creates:
+
+- `~/.config/remote-demo-mcp/config.json`
+- Interactive mode shows each current field value for editing.
+- Press Enter without input to keep the current value unchanged.
+- If config already exists, `init` asks whether to modify, then asks final confirmation before overwrite.
+
 
 # codex 使用
 ## 安裝 npm 包
@@ -217,7 +230,8 @@ codex mcp add remote-demo-mcp remote-demo-mcp
 
 ## remote-demo-mcp 的配置
 ```bash 
-vi  ~/.config/remote-demo-mcp/config.json
+remote-demo-mcp init
+vi ~/.config/remote-demo-mcp/config.json
 ```
 
 ```json

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import type { IPty } from "node-pty";
 import { spawn as spawnPty } from "node-pty";
 import type { AppConfig } from "./config.js";
@@ -31,6 +32,7 @@ type DeploySession = DeploySessionSnapshot & {
   autoPasswordAttempts: number;
   sshPassword: string;
   autoFillPassword: boolean;
+  sshpassAvailable: boolean;
   logEnabled: boolean;
   logPathValue: string;
   logInputValue: boolean;
@@ -41,6 +43,12 @@ const OUTPUT_LIMIT = 64_000;
 const OTP_HINT = /(otp|passcode|verification code|enter code|mfa|authenticator|token|one-time|one time)/i;
 const PASSWORD_HINT = /password[^:\n\r]*:/i;
 const HOSTKEY_CONFIRM_HINT = /continue connecting\s*\(yes\/no(?:\/\[[^\]]+\])?\)\?/i;
+
+function isSshpassAvailable(): boolean {
+  const result = spawnSync("sshpass", ["-V"], { stdio: "ignore" });
+  return !result.error && result.status === 0;
+}
+
 function writeLog(session: DeploySession, level: "INFO" | "STDOUT" | "STDERR" | "INPUT" | "ERROR", text: string): void {
   if (!session.logEnabled) {
     return;
@@ -102,6 +110,13 @@ function appendOutput(session: DeploySession, chunk: string): void {
     return;
   }
 
+  if (!session.autoFillPassword && PASSWORD_HINT.test(normalizedChunk)) {
+    session.state = "waiting_input";
+    session.message = "Password input required (sshpass not found). Call submit_deploy_input with password first.";
+    writeLog(session, "INFO", "State changed to waiting_input for password prompt.");
+    return;
+  }
+
   if (OTP_HINT.test(normalizedChunk)) {
     session.state = "waiting_input";
     session.message = "OTP input required. Call submit_deploy_input with OTP code.";
@@ -131,6 +146,8 @@ function makeSnapshot(session: DeploySession): DeploySessionSnapshot {
 
 export function startDeploySession(config: AppConfig, localDir: string, clientCwd?: string): { snapshot: DeploySessionSnapshot; output: string; nextCursor: number } {
   const plan = prepareDeploy(config, localDir, clientCwd);
+  const sshpassAvailable = isSshpassAvailable();
+  const autoFillPassword = config.ssh.autoFillPassword && sshpassAvailable;
   const pty = spawnPty(plan.command[0], plan.command.slice(1), {
     name: "xterm-color",
     cols: 120,
@@ -157,13 +174,19 @@ export function startDeploySession(config: AppConfig, localDir: string, clientCw
     autoHostKeyAccepted: false,
     autoPasswordAttempts: 0,
     sshPassword: config.ssh.password,
-    autoFillPassword: config.ssh.autoFillPassword,
+    autoFillPassword,
+    sshpassAvailable,
     logEnabled: config.sessionLog.enabled,
     logPathValue: config.sessionLog.path,
     logInputValue: config.sessionLog.logInputValue,
   };
   writeLog(session, "INFO", `Deploy started. localDir=${plan.resolvedLocalDir}`);
   writeLog(session, "INFO", `Command: ${formatCommandForShell(plan.command)}`);
+  writeLog(
+    session,
+    "INFO",
+    `sshpass available=${String(sshpassAvailable)}; autoFillPassword=${String(autoFillPassword)}.`,
+  );
 
   pty.onData((chunk: string) => {
     appendOutput(session, chunk);

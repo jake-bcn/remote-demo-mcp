@@ -42,9 +42,29 @@ const configSchema = z.object({
 
 export type AppConfig = z.infer<typeof configSchema>;
 
-function getConfigPath(): string {
+export function getConfigPath(): string {
   return process.env.REMOTE_DEMO_MCP_CONFIG ?? path.join(os.homedir(), ".config", "remote-demo-mcp", "config.json");
 }
+
+export const DEFAULT_CONFIG_TEMPLATE = {
+  deployUser: "demo_user-01",
+  publicBaseUrl: "https://example.com",
+  sessionLog: {
+    enabled: false,
+    path: "/tmp/remote-demo-mcp-session.log",
+    logInputValue: false,
+  },
+  ssh: {
+    host: "xxx.xxx.xxx.xxx",
+    port: 2222,
+    username: "alice123#ec2-user#52.76.147.44",
+    interactiveAuth: true,
+    password: "",
+    hostKeyPolicy: "accept-new",
+    autoFillPassword: true,
+  },
+  rsyncOptions: ["-az", "--delete"],
+} as const;
 
 export function loadConfig(): AppConfig {
   const configPath = getConfigPath();

@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 
+import fs from "node:fs";
+import path from "node:path";
+import process from "node:process";
+import { createInterface } from "node:readline/promises";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { loadConfig } from "./config.js";
+import { DEFAULT_CONFIG_TEMPLATE, getConfigPath, loadConfig } from "./config.js";
 import { deployWithRsync } from "./rsync.js";
 import { cancelDeploySession, pollDeploySession, startDeploySession, submitDeployInput } from "./deploy-session.js";
 
@@ -14,6 +18,150 @@ function normalizeVerifyUrl(rawUrl: string): string {
     target.pathname = `${normalizedPath}/index.html`;
   }
   return target.toString();
+}
+
+function isYes(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "y" || normalized === "yes";
+}
+
+type EditableConfig = {
+  deployUser: string;
+  publicBaseUrl: string;
+  sessionLog: {
+    enabled: boolean;
+    path: string;
+    logInputValue: boolean;
+  };
+  ssh: {
+    host: string;
+    port: number;
+    username: string;
+    interactiveAuth: boolean;
+    password: string;
+    hostKeyPolicy: "accept-new" | "strict" | "insecure";
+    autoFillPassword: boolean;
+  };
+  rsyncOptions: string[];
+};
+
+function cloneDefaultConfig(): EditableConfig {
+  return JSON.parse(JSON.stringify(DEFAULT_CONFIG_TEMPLATE)) as EditableConfig;
+}
+
+function loadEditableConfig(configPath: string): EditableConfig {
+  const base = cloneDefaultConfig();
+  if (!fs.existsSync(configPath)) {
+    return base;
+  }
+
+  try {
+    const raw = JSON.parse(fs.readFileSync(configPath, "utf8")) as Record<string, unknown>;
+    if (typeof raw.deployUser === "string" && raw.deployUser.trim()) base.deployUser = raw.deployUser;
+    if (typeof raw.publicBaseUrl === "string") base.publicBaseUrl = raw.publicBaseUrl;
+
+    if (raw.sessionLog && typeof raw.sessionLog === "object") {
+      const sessionLog = raw.sessionLog as Record<string, unknown>;
+      if (typeof sessionLog.enabled === "boolean") base.sessionLog.enabled = sessionLog.enabled;
+      if (typeof sessionLog.path === "string" && sessionLog.path.trim()) base.sessionLog.path = sessionLog.path;
+      if (typeof sessionLog.logInputValue === "boolean") base.sessionLog.logInputValue = sessionLog.logInputValue;
+    }
+
+    if (raw.ssh && typeof raw.ssh === "object") {
+      const ssh = raw.ssh as Record<string, unknown>;
+      if (typeof ssh.host === "string" && ssh.host.trim()) base.ssh.host = ssh.host;
+      if (typeof ssh.port === "number" && Number.isInteger(ssh.port) && ssh.port > 0 && ssh.port <= 65535) base.ssh.port = ssh.port;
+      if (typeof ssh.username === "string" && ssh.username.trim()) base.ssh.username = ssh.username;
+      if (typeof ssh.interactiveAuth === "boolean") base.ssh.interactiveAuth = ssh.interactiveAuth;
+      if (typeof ssh.password === "string") base.ssh.password = ssh.password;
+      if (ssh.hostKeyPolicy === "accept-new" || ssh.hostKeyPolicy === "strict" || ssh.hostKeyPolicy === "insecure") {
+        base.ssh.hostKeyPolicy = ssh.hostKeyPolicy;
+      }
+      if (typeof ssh.autoFillPassword === "boolean") base.ssh.autoFillPassword = ssh.autoFillPassword;
+    }
+
+    if (Array.isArray(raw.rsyncOptions) && raw.rsyncOptions.every((item) => typeof item === "string")) {
+      base.rsyncOptions = raw.rsyncOptions;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stdout.write(`Existing config parse failed, using defaults for editing: ${message}\n`);
+  }
+
+  return base;
+}
+
+function toSerializableConfig(config: EditableConfig): Record<string, unknown> {
+  return {
+    deployUser: config.deployUser,
+    publicBaseUrl: config.publicBaseUrl.trim() ? config.publicBaseUrl : undefined,
+    sessionLog: config.sessionLog,
+    ssh: config.ssh,
+    rsyncOptions: config.rsyncOptions,
+  };
+}
+
+async function promptString(rl: ReturnType<typeof createInterface>, label: string, current: string): Promise<string> {
+  const answer = (await rl.question(`${label} [${current}]: `)).trim();
+  return answer ? answer : current;
+}
+
+async function promptBoolean(rl: ReturnType<typeof createInterface>, label: string, current: boolean): Promise<boolean> {
+  const answer = (await rl.question(`${label} [${String(current)}]: `)).trim();
+  if (!answer) return current;
+  const normalized = answer.toLowerCase();
+  if (["1", "true", "t", "yes", "y"].includes(normalized)) return true;
+  if (["0", "false", "f", "no", "n"].includes(normalized)) return false;
+  process.stdout.write(`Invalid boolean input "${answer}", keep current value.\n`);
+  return current;
+}
+
+async function promptNumber(rl: ReturnType<typeof createInterface>, label: string, current: number): Promise<number> {
+  const answer = (await rl.question(`${label} [${String(current)}]: `)).trim();
+  if (!answer) return current;
+  const parsed = Number(answer);
+  if (Number.isInteger(parsed) && parsed > 0 && parsed <= 65535) return parsed;
+  process.stdout.write(`Invalid number "${answer}", keep current value.\n`);
+  return current;
+}
+
+async function promptHostKeyPolicy(
+  rl: ReturnType<typeof createInterface>,
+  current: "accept-new" | "strict" | "insecure",
+): Promise<"accept-new" | "strict" | "insecure"> {
+  const answer = (await rl.question(`ssh.hostKeyPolicy [${current}] (accept-new/strict/insecure): `)).trim();
+  if (!answer) return current;
+  if (answer === "accept-new" || answer === "strict" || answer === "insecure") return answer;
+  process.stdout.write(`Invalid hostKeyPolicy "${answer}", keep current value.\n`);
+  return current;
+}
+
+async function promptRsyncOptions(rl: ReturnType<typeof createInterface>, current: string[]): Promise<string[]> {
+  const currentValue = current.join(", ");
+  const answer = (await rl.question(`rsyncOptions (comma-separated) [${currentValue}]: `)).trim();
+  if (!answer) return current;
+  return answer
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+async function promptConfigEdits(rl: ReturnType<typeof createInterface>, config: EditableConfig): Promise<EditableConfig> {
+  process.stdout.write("Edit config. Press Enter to keep current value.\n");
+  config.deployUser = await promptString(rl, "deployUser", config.deployUser);
+  config.publicBaseUrl = await promptString(rl, "publicBaseUrl", config.publicBaseUrl);
+  config.sessionLog.enabled = await promptBoolean(rl, "sessionLog.enabled", config.sessionLog.enabled);
+  config.sessionLog.path = await promptString(rl, "sessionLog.path", config.sessionLog.path);
+  config.sessionLog.logInputValue = await promptBoolean(rl, "sessionLog.logInputValue", config.sessionLog.logInputValue);
+  config.ssh.host = await promptString(rl, "ssh.host", config.ssh.host);
+  config.ssh.port = await promptNumber(rl, "ssh.port", config.ssh.port);
+  config.ssh.username = await promptString(rl, "ssh.username", config.ssh.username);
+  config.ssh.interactiveAuth = await promptBoolean(rl, "ssh.interactiveAuth", config.ssh.interactiveAuth);
+  config.ssh.password = await promptString(rl, "ssh.password", config.ssh.password);
+  config.ssh.hostKeyPolicy = await promptHostKeyPolicy(rl, config.ssh.hostKeyPolicy);
+  config.ssh.autoFillPassword = await promptBoolean(rl, "ssh.autoFillPassword", config.ssh.autoFillPassword);
+  config.rsyncOptions = await promptRsyncOptions(rl, config.rsyncOptions);
+  return config;
 }
 
 const server = new McpServer({
@@ -329,6 +477,53 @@ server.registerTool(
 );
 
 async function main(): Promise<void> {
+  const [, , arg1] = process.argv;
+  if (arg1 === "init") {
+    const configPath = getConfigPath();
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    const exists = fs.existsSync(configPath);
+
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+      if (exists) {
+        process.stdout.write(`Config already exists: ${configPath}\n`);
+        process.stdout.write("Non-interactive shell detected; skip rewrite.\n");
+        return;
+      }
+      fs.writeFileSync(`${configPath}`, `${JSON.stringify(DEFAULT_CONFIG_TEMPLATE, null, 2)}\n`, { encoding: "utf8" });
+      process.stdout.write(`Config initialized: ${configPath}\n`);
+      return;
+    }
+
+    const rl = createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    try {
+      if (exists) {
+        const modify = await rl.question(`Config already exists: ${configPath}\nModify it? [y/N]: `);
+        if (!isYes(modify)) {
+          process.stdout.write("Keeping existing config.\n");
+          return;
+        }
+      }
+
+      const editable = loadEditableConfig(configPath);
+      const updated = await promptConfigEdits(rl, editable);
+      const confirm = await rl.question("Final confirm: write config file now? [y/N]: ");
+      if (!isYes(confirm)) {
+        process.stdout.write("Write cancelled.\n");
+        return;
+      }
+
+      fs.writeFileSync(`${configPath}`, `${JSON.stringify(toSerializableConfig(updated), null, 2)}\n`, { encoding: "utf8" });
+      process.stdout.write(`Config initialized: ${configPath}\n`);
+      return;
+    } finally {
+      rl.close();
+    }
+  }
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
