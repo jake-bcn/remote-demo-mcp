@@ -1,0 +1,36 @@
+{
+  "name": "@jake.e-com365/remote-demo-mcp",
+  "version": "0.0.3",
+  "description": "MCP server to deploy local static sites to remote demo host via rsync",
+  "main": "dist/index.js",
+  "bin": {
+    "remote-demo-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "postinstall": "npm rebuild node-pty",
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "node-pty": "^1.1.0",
+    "zod": "^4.3.6"
+  },
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "typescript": "^6.0.2"
+  }
+}
