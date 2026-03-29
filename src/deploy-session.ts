@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
+import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 import type { IPty } from "node-pty";
 import { spawn as spawnPty } from "node-pty";
@@ -40,12 +42,60 @@ type DeploySession = DeploySessionSnapshot & {
 
 const sessions = new Map<string, DeploySession>();
 const OUTPUT_LIMIT = 64_000;
+const require = createRequire(import.meta.url);
 const OTP_HINT = /(otp|passcode|verification code|enter code|mfa|authenticator|token|one-time|one time)/i;
 const PASSWORD_HINT = /password[^:\n\r]*:/i;
 const HOSTKEY_CONFIRM_HINT = /continue connecting\s*\(yes\/no(?:\/\[[^\]]+\])?\)\?/i;
 
-function isSshpassAvailable(): boolean {
-  const result = spawnSync("sshpass", ["-V"], { stdio: "ignore" });
+type HelperRepairResult = { checked: number; fixed: string[]; errors: string[] };
+
+function ensureNodePtySpawnHelperExecutable(): HelperRepairResult {
+  const result: HelperRepairResult = { checked: 0, fixed: [], errors: [] };
+  const candidates = new Set<string>();
+  try {
+    const nodePtyMain = require.resolve("node-pty");
+    const nodePtyRoot = path.dirname(path.dirname(nodePtyMain));
+    const prebuildsDir = path.join(nodePtyRoot, "prebuilds");
+    if (fs.existsSync(prebuildsDir) && fs.statSync(prebuildsDir).isDirectory()) {
+      for (const entry of fs.readdirSync(prebuildsDir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) {
+          continue;
+        }
+        candidates.add(path.join(prebuildsDir, entry.name, "spawn-helper"));
+      }
+    }
+    candidates.add(path.join(nodePtyRoot, "build", "Release", "spawn-helper"));
+  } catch (error) {
+    result.errors.push(`resolve node-pty failed: ${error instanceof Error ? error.message : String(error)}`);
+    return result;
+  }
+
+  for (const helperPath of candidates) {
+    try {
+      if (!fs.existsSync(helperPath)) {
+        continue;
+      }
+      result.checked += 1;
+      const stats = fs.statSync(helperPath);
+      const mode = stats.mode & 0o777;
+      if ((mode & 0o111) !== 0) {
+        continue;
+      }
+      const nextMode = mode | 0o755;
+      fs.chmodSync(helperPath, nextMode);
+      result.fixed.push(helperPath);
+    } catch (error) {
+      result.errors.push(`${helperPath}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return result;
+}
+
+function isSshpassAvailable(sshpassPath?: string): boolean {
+  if (!sshpassPath) {
+    return false;
+  }
+  const result = spawnSync(sshpassPath, ["-V"], { stdio: "ignore" });
   return !result.error && result.status === 0;
 }
 
@@ -146,15 +196,24 @@ function makeSnapshot(session: DeploySession): DeploySessionSnapshot {
 
 export function startDeploySession(config: AppConfig, localDir: string, clientCwd?: string): { snapshot: DeploySessionSnapshot; output: string; nextCursor: number } {
   const plan = prepareDeploy(config, localDir, clientCwd);
-  const sshpassAvailable = isSshpassAvailable();
+  const helperRepair = ensureNodePtySpawnHelperExecutable();
+  const sshpassAvailable = isSshpassAvailable(plan.commands.sshpass);
   const autoFillPassword = config.ssh.autoFillPassword && sshpassAvailable;
-  const pty = spawnPty(plan.command[0], plan.command.slice(1), {
-    name: "xterm-color",
-    cols: 120,
-    rows: 40,
-    cwd: process.cwd(),
-    env: process.env as Record<string, string | undefined>,
-  });
+  let pty: IPty;
+  try {
+    pty = spawnPty(plan.command[0], plan.command.slice(1), {
+      name: "xterm-color",
+      cols: 120,
+      rows: 40,
+      cwd: process.cwd(),
+      env: process.env as Record<string, string | undefined>,
+    });
+  } catch (error) {
+    const details = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Failed to start interactive deploy process: ${details}. command=${plan.command[0]} cwd=${process.cwd()} PATH=${process.env.PATH ?? ""} helperChecked=${helperRepair.checked} helperFixed=${helperRepair.fixed.length} helperErrors=${helperRepair.errors.join(" | ")}`,
+    );
+  }
 
   const sessionId = randomUUID();
   const session: DeploySession = {
@@ -182,6 +241,20 @@ export function startDeploySession(config: AppConfig, localDir: string, clientCw
   };
   writeLog(session, "INFO", `Deploy started. localDir=${plan.resolvedLocalDir}`);
   writeLog(session, "INFO", `Command: ${formatCommandForShell(plan.command)}`);
+  writeLog(
+    session,
+    "INFO",
+    `node-pty helper check: checked=${helperRepair.checked} fixed=${helperRepair.fixed.length} errors=${helperRepair.errors.length}`,
+  );
+  for (const helperPath of helperRepair.fixed) {
+    writeLog(session, "INFO", `Fixed non-executable node-pty helper: ${helperPath}`);
+  }
+  for (const helperError of helperRepair.errors) {
+    writeLog(session, "ERROR", `node-pty helper check error: ${helperError}`);
+  }
+  for (const note of plan.compatibilityNotes) {
+    writeLog(session, "INFO", `Compatibility note: ${note}`);
+  }
   writeLog(
     session,
     "INFO",

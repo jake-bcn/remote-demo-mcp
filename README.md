@@ -56,8 +56,14 @@ Example:
 The server automatically enables resumable uploads by appending:
 
 - `--partial`
-- `--append-verify`
+- `--append-verify` (if local rsync supports it)
 - `--progress` (unless `rsyncOptions` already includes `--progress` or `--info=...`)
+
+Compatibility note:
+
+- On macOS built-in `rsync 2.6.9`, `--append-verify` is unsupported.
+- This server auto-detects capability and removes `--append-verify` automatically when unsupported.
+- Interactive session mode uses `node-pty`. If you see `posix_spawnp failed` on macOS/Linux, it is often caused by non-executable `node-pty` helper (`.../node-pty/prebuilds/*/spawn-helper`). This server now checks and auto-fixes helper execute permission at session start.
 
 Remote target base path is hard-coded and cannot be overridden:
 

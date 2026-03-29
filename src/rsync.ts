@@ -1,10 +1,28 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { closeTty, openTty, promptRetry } from "./tty.js";
 import type { AppConfig } from "./config.js";
 
 const FIXED_REMOTE_BASE_PATH = "/var/www/html/demo-remote";
+const FALLBACK_PATH_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
+
+type ResolvedCommands = {
+  rsync: string;
+  ssh: string;
+  sshpass?: string;
+};
+
+type RsyncCapabilities = {
+  appendVerify: boolean;
+};
+
+type RuntimeDeps = {
+  commands: ResolvedCommands;
+  rsyncCapabilities: RsyncCapabilities;
+};
+
+let runtimeDepsCache: RuntimeDeps | null = null;
 
 export type DeployResult = {
   ok: boolean;
@@ -23,6 +41,8 @@ export type DeployPlan = {
   publicUrl?: string;
   command: string[];
   resolvedLocalDir: string;
+  compatibilityNotes: string[];
+  commands: ResolvedCommands;
 };
 
 export function deriveProjectName(localDir: string, clientCwd?: string): string {
@@ -77,6 +97,83 @@ function ensureTrailingSlash(input: string): string {
   return input.endsWith(path.sep) ? input : `${input}${path.sep}`;
 }
 
+function isExecutableFile(filePath: string): boolean {
+  const stat = fs.statSync(filePath, { throwIfNoEntry: false });
+  if (!stat || !stat.isFile()) {
+    return false;
+  }
+  return (stat.mode & 0o111) !== 0;
+}
+
+function getSearchDirs(): string[] {
+  const pathDirs = (process.env.PATH ?? "")
+    .split(path.delimiter)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0);
+  const merged = [...pathDirs, ...FALLBACK_PATH_DIRS];
+  return [...new Set(merged)];
+}
+
+function resolveExecutable(command: string): string | undefined {
+  if (path.isAbsolute(command)) {
+    return isExecutableFile(command) ? command : undefined;
+  }
+
+  for (const dir of getSearchDirs()) {
+    const fullPath = path.join(dir, command);
+    if (isExecutableFile(fullPath)) {
+      return fullPath;
+    }
+  }
+  return undefined;
+}
+
+function detectRsyncCapabilities(rsyncPath: string): RsyncCapabilities {
+  const result = spawnSync(rsyncPath, ["--help"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const combined = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  return {
+    appendVerify: /--append-verify\b/.test(combined),
+  };
+}
+
+function getRuntimeDeps(): RuntimeDeps {
+  if (runtimeDepsCache) {
+    return runtimeDepsCache;
+  }
+
+  const rsyncPath = resolveExecutable("rsync");
+  if (!rsyncPath) {
+    throw new Error(
+      `Required command not found: rsync. PATH=${process.env.PATH ?? ""}. Install rsync (brew install rsync) or expose it in PATH.`,
+    );
+  }
+
+  const sshPath = resolveExecutable("ssh");
+  if (!sshPath) {
+    throw new Error(
+      `Required command not found: ssh. PATH=${process.env.PATH ?? ""}. Ensure OpenSSH client is installed and available.`,
+    );
+  }
+
+  const sshpassPath = resolveExecutable("sshpass");
+  runtimeDepsCache = {
+    commands: {
+      rsync: rsyncPath,
+      ssh: sshPath,
+      sshpass: sshpassPath,
+    },
+    rsyncCapabilities: detectRsyncCapabilities(rsyncPath),
+  };
+  return runtimeDepsCache;
+}
+
+export function getResolvedCommandPaths(): ResolvedCommands {
+  return getRuntimeDeps().commands;
+}
+
 export function formatCommandForShell(args: string[]): string {
   return args
     .map((arg, index) => {
@@ -123,7 +220,12 @@ async function runRsyncOnce(args: string[], tty: ReturnType<typeof openTty>): Pr
     }
 
     child.on("error", (error) => {
-      reject(error);
+      const details = error instanceof Error ? error.message : String(error);
+      reject(
+        new Error(
+          `Failed to spawn deploy command: ${details}. command=${args[0]} cwd=${process.cwd()} PATH=${process.env.PATH ?? ""}`,
+        ),
+      );
     });
 
     child.on("close", (code, signal) => {
@@ -138,7 +240,14 @@ async function runRsyncOnce(args: string[], tty: ReturnType<typeof openTty>): Pr
   });
 }
 
-function buildRsyncCommand(config: AppConfig, resolvedLocalDir: string, remotePath: string): string[] {
+function buildRsyncCommand(
+  config: AppConfig,
+  resolvedLocalDir: string,
+  remotePath: string,
+  commands: ResolvedCommands,
+  rsyncCapabilities: RsyncCapabilities,
+): { command: string[]; compatibilityNotes: string[] } {
+  const compatibilityNotes: string[] = [];
   const sshOptions = ["-p", String(config.ssh.port)];
 
   if (config.ssh.hostKeyPolicy === "accept-new") {
@@ -149,7 +258,7 @@ function buildRsyncCommand(config: AppConfig, resolvedLocalDir: string, remotePa
     sshOptions.push("-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null");
   }
 
-  const sshCommand = ["ssh", ...sshOptions].join(" ");
+  const sshCommand = [commands.ssh, ...sshOptions].join(" ");
   const sourceDir = ensureTrailingSlash(resolvedLocalDir);
   const destination = `${config.ssh.username}@${config.ssh.host}:${remotePath}`;
   const hasPartial = config.rsyncOptions.some((option) => option === "--partial");
@@ -157,23 +266,33 @@ function buildRsyncCommand(config: AppConfig, resolvedLocalDir: string, remotePa
   const hasProgress =
     config.rsyncOptions.some((option) => option === "--progress") ||
     config.rsyncOptions.some((option) => option.startsWith("--info="));
-  const resumableOptions = [...config.rsyncOptions];
+  const baseOptions = rsyncCapabilities.appendVerify
+    ? [...config.rsyncOptions]
+    : config.rsyncOptions.filter((option) => option !== "--append-verify");
+  const resumableOptions = [...baseOptions];
 
   // Force resumable transfer behavior for interrupted deployments.
   if (!hasPartial) {
     resumableOptions.push("--partial");
   }
-  if (!hasAppendVerify) {
+  if (!rsyncCapabilities.appendVerify && hasAppendVerify) {
+    compatibilityNotes.push("rsync does not support --append-verify on this host; removed it from command.");
+  }
+  if (rsyncCapabilities.appendVerify && !hasAppendVerify) {
     resumableOptions.push("--append-verify");
   }
   if (!hasProgress) {
     resumableOptions.push("--progress");
   }
 
-  return ["rsync", ...resumableOptions, "-e", sshCommand, "--", sourceDir, destination];
+  return {
+    command: [commands.rsync, ...resumableOptions, "-e", sshCommand, "--", sourceDir, destination],
+    compatibilityNotes,
+  };
 }
 
 export function prepareDeploy(config: AppConfig, localDir: string, clientCwd?: string): DeployPlan {
+  const runtimeDeps = getRuntimeDeps();
   const resolvedLocalDir = resolveLocalDir(localDir, clientCwd);
   ensureDirectoryExists(resolvedLocalDir);
   const user = config.deployUser;
@@ -183,7 +302,13 @@ export function prepareDeploy(config: AppConfig, localDir: string, clientCwd?: s
   assertSafePathSegment(project, "project");
   const remotePath = buildAndValidateRemotePath(user, project);
   const publicUrl = buildPublicUrl(config, user, project);
-  const command = buildRsyncCommand(config, resolvedLocalDir, remotePath);
+  const { command, compatibilityNotes } = buildRsyncCommand(
+    config,
+    resolvedLocalDir,
+    remotePath,
+    runtimeDeps.commands,
+    runtimeDeps.rsyncCapabilities,
+  );
 
   return {
     user,
@@ -192,14 +317,17 @@ export function prepareDeploy(config: AppConfig, localDir: string, clientCwd?: s
     publicUrl,
     command,
     resolvedLocalDir,
+    compatibilityNotes,
+    commands: runtimeDeps.commands,
   };
 }
 
 export async function deployWithRsync(config: AppConfig, localDir: string, dryRun: boolean, clientCwd?: string): Promise<DeployResult> {
   const plan = prepareDeploy(config, localDir, clientCwd);
-  const { user, project, remotePath, publicUrl, command } = plan;
+  const { user, project, remotePath, publicUrl, command, compatibilityNotes } = plan;
 
   if (dryRun) {
+    const notes = compatibilityNotes.length > 0 ? ` Compatibility: ${compatibilityNotes.join(" ")}` : "";
     return {
       ok: true,
       attempts: 0,
@@ -207,7 +335,7 @@ export async function deployWithRsync(config: AppConfig, localDir: string, dryRu
       project,
       remotePath,
       publicUrl,
-      message: `Dry run command: ${formatCommandForShell(command)}`,
+      message: `Dry run command: ${formatCommandForShell(command)}${notes}`,
     };
   }
 
