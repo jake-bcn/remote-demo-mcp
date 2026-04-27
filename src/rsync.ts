@@ -263,6 +263,13 @@ function buildRsyncCommand(
   const destination = `${config.ssh.username}@${config.ssh.host}:${remotePath}`;
   const hasPartial = config.rsyncOptions.some((option) => option === "--partial");
   const hasAppendVerify = config.rsyncOptions.some((option) => option === "--append-verify");
+  const hasChecksum = config.rsyncOptions.some((option) => {
+    if (option === "--checksum" || option === "-c") {
+      return true;
+    }
+    // Support short-option bundles like "-azc".
+    return /^-[^-]/.test(option) && option.includes("c");
+  });
   const hasProgress =
     config.rsyncOptions.some((option) => option === "--progress") ||
     config.rsyncOptions.some((option) => option.startsWith("--info="));
@@ -274,6 +281,10 @@ function buildRsyncCommand(
   // Force resumable transfer behavior for interrupted deployments.
   if (!hasPartial) {
     resumableOptions.push("--partial");
+  }
+  // Ensure accurate change detection even if mtime/size are unchanged.
+  if (!hasChecksum) {
+    resumableOptions.push("--checksum");
   }
   if (!rsyncCapabilities.appendVerify && hasAppendVerify) {
     compatibilityNotes.push("rsync does not support --append-verify on this host; removed it from command.");

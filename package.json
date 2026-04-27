@@ -1,6 +1,6 @@
 {
   "name": "@jake.e-com365/remote-demo-mcp",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "MCP server to deploy local static sites to remote demo host via rsync",
   "main": "dist/index.js",
   "bin": {

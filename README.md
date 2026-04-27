@@ -56,6 +56,7 @@ Example:
 The server automatically enables resumable uploads by appending:
 
 - `--partial`
+- `--checksum`
 - `--append-verify` (if local rsync supports it)
 - `--progress` (unless `rsyncOptions` already includes `--progress` or `--info=...`)
 
