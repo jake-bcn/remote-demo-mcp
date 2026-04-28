@@ -6,6 +6,7 @@ set -euo pipefail
 # - $REMOTE_DEMO_MCP_CONFIG if set
 # - otherwise ~/.config/remote-demo-mcp/config.json
 CONFIG_PATH="${REMOTE_DEMO_MCP_CONFIG:-$HOME/.config/remote-demo-mcp/config.json}"
+USE_SSHPASS="${USE_SSHPASS:-0}"
 
 REMOTE_BASE="/var/www/html/demo-remote"
 PUBLIC_BASE_URL=""
@@ -139,12 +140,88 @@ printf '%q ' "${CMD_PREVIEW[@]}"
 echo
 echo
 
-if command -v sshpass >/dev/null 2>&1 && [[ -n "$SSH_PASSWORD" ]]; then
+if command -v expect >/dev/null 2>&1 && [[ -n "$SSH_PASSWORD" ]]; then
+  echo "Using expect: auto-fill password once, then switch to interactive mode for OTP."
+  RSYNC_OPTS_STR="$(printf '%s ' "${RSYNC_OPTS[@]}")"
+  export SSH_PASSWORD SSH_CMD SOURCE_DIR DEST RSYNC_OPTS_STR
+  expect <<'EOF'
+    log_user 1
+    set timeout -1
+    set tty [open "/dev/tty" r+]
+
+    set ssh_password $env(SSH_PASSWORD)
+    set ssh_cmd $env(SSH_CMD)
+    set source_dir $env(SOURCE_DIR)
+    set dest $env(DEST)
+    set rsync_opts [split [string trim $env(RSYNC_OPTS_STR)] " "]
+    set sent_password 0
+    set sent_otp 0
+    set otp_hint {(?i)(otp|passcode|verification code|enter code|mfa|authenticator|token|one[- ]time)}
+
+    set cmd [list rsync]
+    foreach o $rsync_opts {
+      lappend cmd $o
+    }
+    lappend cmd -e $ssh_cmd -- $source_dir $dest
+    eval spawn $cmd
+
+    while {1} {
+      expect {
+        -re {(?i)continue connecting.*\(yes/no} {
+          send -- "yes\r"
+          exp_continue
+        }
+        -re {(?i)password[^:\r\n]*:} {
+          if {$sent_password == 0} {
+            send -- "$ssh_password\r"
+            set sent_password 1
+            puts "\nPassword submitted. Waiting for OTP prompt..."
+            exp_continue
+          } else {
+            puts "\nPassword prompt appeared again. Switching to interactive mode."
+            interact
+            catch wait result
+            set code [lindex $result 3]
+            exit $code
+          }
+        }
+        -re $otp_hint {
+          if {$sent_otp == 1} {
+            exp_continue
+          }
+          puts -nonewline $tty "\nPlease Enter OTP: "
+          flush $tty
+          if {[gets $tty otp_code] < 0} {
+            puts stderr "\nNo OTP input received from stdin. Exiting."
+            exit 1
+          }
+          if {[string length [string trim $otp_code]] == 0} {
+            puts stderr "\nEmpty OTP input. Exiting."
+            exit 1
+          }
+          send -- "$otp_code\r"
+          set sent_otp 1
+          exp_continue
+        }
+        eof {
+          close $tty
+          catch wait result
+          set code [lindex $result 3]
+          exit $code
+        }
+      }
+    }
+EOF
+elif [[ "$USE_SSHPASS" == "1" ]] && command -v sshpass >/dev/null 2>&1 && [[ -n "$SSH_PASSWORD" ]]; then
   echo "Using sshpass: password auto-filled, OTP still manual."
   RSYNC_RSH="sshpass -p \"$SSH_PASSWORD\" $SSH_CMD"
   rsync "${RSYNC_OPTS[@]}" -e "$RSYNC_RSH" -- "$SOURCE_DIR" "$DEST"
 else
-  echo "sshpass not found (or password empty): manual mode."
+  if [[ "$USE_SSHPASS" == "1" ]]; then
+    echo "USE_SSHPASS=1 but sshpass not found (or password empty): manual mode."
+  else
+    echo "Manual mode (default): input password and OTP in terminal prompts."
+  fi
   echo "Please input SSH password and OTP in terminal prompts."
   "${CMD_PREVIEW[@]}"
 fi
