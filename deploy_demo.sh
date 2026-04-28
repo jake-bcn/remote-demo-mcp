@@ -139,55 +139,12 @@ printf '%q ' "${CMD_PREVIEW[@]}"
 echo
 echo
 
-if command -v expect >/dev/null 2>&1; then
-  RSYNC_OPTS_STR="$(printf '%s ' "${RSYNC_OPTS[@]}")"
-  export SSH_PASSWORD SSH_CMD SOURCE_DIR DEST RSYNC_OPTS_STR
-
-  expect <<'EOF'
-    log_user 1
-    set timeout -1
-
-    set ssh_password $env(SSH_PASSWORD)
-    set ssh_cmd $env(SSH_CMD)
-    set source_dir $env(SOURCE_DIR)
-    set dest $env(DEST)
-    set rsync_opts [split [string trim $env(RSYNC_OPTS_STR)] " "]
-
-    set cmd [list rsync]
-    foreach o $rsync_opts {
-      lappend cmd $o
-    }
-    lappend cmd -e $ssh_cmd -- $source_dir $dest
-
-    eval spawn $cmd
-
-    while {1} {
-      expect {
-        -re {(?i)continue connecting.*\(yes/no} {
-          send -- "yes\r"
-          exp_continue
-        }
-        -re {(?i)password[^:\r\n]*:} {
-          send -- "$ssh_password\r"
-          exp_continue
-        }
-        -re {(?i)(otp|passcode|verification code|enter code|mfa|authenticator|token|one[- ]time)} {
-          puts "\nOTP detected. Switch to interactive mode; please type OTP directly."
-          interact
-          catch wait result
-          set code [lindex $result 3]
-          exit $code
-        }
-        eof {
-          catch wait result
-          set code [lindex $result 3]
-          exit $code
-        }
-      }
-    }
-EOF
+if command -v sshpass >/dev/null 2>&1 && [[ -n "$SSH_PASSWORD" ]]; then
+  echo "Using sshpass: password auto-filled, OTP still manual."
+  RSYNC_RSH="sshpass -p \"$SSH_PASSWORD\" $SSH_CMD"
+  rsync "${RSYNC_OPTS[@]}" -e "$RSYNC_RSH" -- "$SOURCE_DIR" "$DEST"
 else
-  echo "expect not found: switching to manual mode."
-  echo "Please input SSH password and OTP directly in terminal prompts."
+  echo "sshpass not found (or password empty): manual mode."
+  echo "Please input SSH password and OTP in terminal prompts."
   "${CMD_PREVIEW[@]}"
 fi
