@@ -172,13 +172,11 @@ if command -v expect >/dev/null 2>&1; then
           exp_continue
         }
         -re {(?i)(otp|passcode|verification code|enter code|mfa|authenticator|token|one[- ]time)} {
-          stty -echo
-          send_user "\nPlease Enter OTP: "
-          expect_user -re "(.*)\n"
-          stty echo
-          send_user "\n"
-          send -- "$expect_out(1,string)\r"
-          exp_continue
+          puts "\nOTP detected. Switch to interactive mode; please type OTP directly."
+          interact
+          catch wait result
+          set code [lindex $result 3]
+          exit $code
         }
         eof {
           catch wait result
