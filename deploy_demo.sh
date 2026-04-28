@@ -6,6 +6,7 @@ set -euo pipefail
 # - $REMOTE_DEMO_MCP_CONFIG if set
 # - otherwise ~/.config/remote-demo-mcp/config.json
 CONFIG_PATH="${REMOTE_DEMO_MCP_CONFIG:-$HOME/.config/remote-demo-mcp/config.json}"
+USE_EXPECT="${USE_EXPECT:-1}"
 
 REMOTE_BASE="/var/www/html/demo-remote"
 PUBLIC_BASE_URL=""
@@ -117,13 +118,8 @@ done
 (( has_checksum == 0 )) && RSYNC_OPTS+=(--checksum)
 (( has_progress == 0 )) && RSYNC_OPTS+=(--progress)
 
-if rsync --help 2>&1 | grep -q -- '--append-verify'; then
-  has_append_verify=0
-  for opt in "${RSYNC_OPTS[@]}"; do
-    [[ "$opt" == "--append-verify" ]] && has_append_verify=1
-  done
-  (( has_append_verify == 0 )) && RSYNC_OPTS+=(--append-verify)
-fi
+# Do not force --append-verify.
+# It is optimized for growing files and may break rollback/shrink scenarios.
 
 SSH_CMD="ssh -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new"
 CMD_PREVIEW=(rsync "${RSYNC_OPTS[@]}" -e "$SSH_CMD" -- "$SOURCE_DIR" "$DEST")
@@ -139,7 +135,7 @@ printf '%q ' "${CMD_PREVIEW[@]}"
 echo
 echo
 
-if command -v expect >/dev/null 2>&1 && [[ -n "$SSH_PASSWORD" ]]; then
+if [[ "$USE_EXPECT" == "1" ]] && command -v expect >/dev/null 2>&1 && [[ -n "$SSH_PASSWORD" ]]; then
   echo "Using expect: auto-fill password once, then switch to interactive mode for OTP."
   RSYNC_OPTS_STR="$(printf '%s ' "${RSYNC_OPTS[@]}")"
   export SSH_PASSWORD SSH_CMD SOURCE_DIR DEST RSYNC_OPTS_STR
@@ -212,7 +208,24 @@ if command -v expect >/dev/null 2>&1 && [[ -n "$SSH_PASSWORD" ]]; then
     }
 EOF
 else
-  echo "expect not found: manual mode."
+  if [[ "$USE_EXPECT" == "1" ]]; then
+    echo "USE_EXPECT=1 but expect not found (or ssh.password empty): manual mode."
+  else
+    echo "Manual mode (default)."
+  fi
   echo "Please input SSH password and OTP in terminal prompts."
   "${CMD_PREVIEW[@]}"
+fi
+
+if [[ -n "$PUBLIC_BASE_URL" ]]; then
+  VERIFY_URL="${PUBLIC_BASE_URL%/}/${DEPLOY_USER}/${REMOTE_DIR}/index.html"
+  echo
+  echo "Verifying deployed index:"
+  echo "  $VERIFY_URL"
+  if command -v curl >/dev/null 2>&1; then
+    CURL_RESULT="$(curl -sS -o /dev/null -w 'status=%{http_code} time=%{time_total}s' "$VERIFY_URL" || true)"
+    echo "  $CURL_RESULT"
+  else
+    echo "  curl not found; skipped."
+  fi
 fi

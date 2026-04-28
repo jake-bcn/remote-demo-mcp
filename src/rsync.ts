@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { closeTty, openTty, promptRetry } from "./tty.js";
 import type { AppConfig } from "./config.js";
 
@@ -13,13 +13,8 @@ type ResolvedCommands = {
   sshpass?: string;
 };
 
-type RsyncCapabilities = {
-  appendVerify: boolean;
-};
-
 type RuntimeDeps = {
   commands: ResolvedCommands;
-  rsyncCapabilities: RsyncCapabilities;
 };
 
 let runtimeDepsCache: RuntimeDeps | null = null;
@@ -128,17 +123,6 @@ function resolveExecutable(command: string): string | undefined {
   return undefined;
 }
 
-function detectRsyncCapabilities(rsyncPath: string): RsyncCapabilities {
-  const result = spawnSync(rsyncPath, ["--help"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  const combined = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-  return {
-    appendVerify: /--append-verify\b/.test(combined),
-  };
-}
-
 function getRuntimeDeps(): RuntimeDeps {
   if (runtimeDepsCache) {
     return runtimeDepsCache;
@@ -165,7 +149,6 @@ function getRuntimeDeps(): RuntimeDeps {
       ssh: sshPath,
       sshpass: sshpassPath,
     },
-    rsyncCapabilities: detectRsyncCapabilities(rsyncPath),
   };
   return runtimeDepsCache;
 }
@@ -245,7 +228,6 @@ function buildRsyncCommand(
   resolvedLocalDir: string,
   remotePath: string,
   commands: ResolvedCommands,
-  rsyncCapabilities: RsyncCapabilities,
 ): { command: string[]; compatibilityNotes: string[] } {
   const compatibilityNotes: string[] = [];
   const sshOptions = ["-p", String(config.ssh.port)];
@@ -262,7 +244,6 @@ function buildRsyncCommand(
   const sourceDir = ensureTrailingSlash(resolvedLocalDir);
   const destination = `${config.ssh.username}@${config.ssh.host}:${remotePath}`;
   const hasPartial = config.rsyncOptions.some((option) => option === "--partial");
-  const hasAppendVerify = config.rsyncOptions.some((option) => option === "--append-verify");
   const hasChecksum = config.rsyncOptions.some((option) => {
     if (option === "--checksum" || option === "-c") {
       return true;
@@ -273,10 +254,7 @@ function buildRsyncCommand(
   const hasProgress =
     config.rsyncOptions.some((option) => option === "--progress") ||
     config.rsyncOptions.some((option) => option.startsWith("--info="));
-  const baseOptions = rsyncCapabilities.appendVerify
-    ? [...config.rsyncOptions]
-    : config.rsyncOptions.filter((option) => option !== "--append-verify");
-  const resumableOptions = [...baseOptions];
+  const resumableOptions = [...config.rsyncOptions];
 
   // Force resumable transfer behavior for interrupted deployments.
   if (!hasPartial) {
@@ -285,12 +263,6 @@ function buildRsyncCommand(
   // Ensure accurate change detection even if mtime/size are unchanged.
   if (!hasChecksum) {
     resumableOptions.push("--checksum");
-  }
-  if (!rsyncCapabilities.appendVerify && hasAppendVerify) {
-    compatibilityNotes.push("rsync does not support --append-verify on this host; removed it from command.");
-  }
-  if (rsyncCapabilities.appendVerify && !hasAppendVerify) {
-    resumableOptions.push("--append-verify");
   }
   if (!hasProgress) {
     resumableOptions.push("--progress");
@@ -318,7 +290,6 @@ export function prepareDeploy(config: AppConfig, localDir: string, clientCwd?: s
     resolvedLocalDir,
     remotePath,
     runtimeDeps.commands,
-    runtimeDeps.rsyncCapabilities,
   );
 
   return {
