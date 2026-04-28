@@ -6,7 +6,6 @@ set -euo pipefail
 # - $REMOTE_DEMO_MCP_CONFIG if set
 # - otherwise ~/.config/remote-demo-mcp/config.json
 CONFIG_PATH="${REMOTE_DEMO_MCP_CONFIG:-$HOME/.config/remote-demo-mcp/config.json}"
-USE_SSHPASS="${USE_SSHPASS:-0}"
 
 REMOTE_BASE="/var/www/html/demo-remote"
 PUBLIC_BASE_URL=""
@@ -212,16 +211,8 @@ if command -v expect >/dev/null 2>&1 && [[ -n "$SSH_PASSWORD" ]]; then
       }
     }
 EOF
-elif [[ "$USE_SSHPASS" == "1" ]] && command -v sshpass >/dev/null 2>&1 && [[ -n "$SSH_PASSWORD" ]]; then
-  echo "Using sshpass: password auto-filled, OTP still manual."
-  RSYNC_RSH="sshpass -p \"$SSH_PASSWORD\" $SSH_CMD"
-  rsync "${RSYNC_OPTS[@]}" -e "$RSYNC_RSH" -- "$SOURCE_DIR" "$DEST"
 else
-  if [[ "$USE_SSHPASS" == "1" ]]; then
-    echo "USE_SSHPASS=1 but sshpass not found (or password empty): manual mode."
-  else
-    echo "Manual mode (default): input password and OTP in terminal prompts."
-  fi
+  echo "expect not found: manual mode."
   echo "Please input SSH password and OTP in terminal prompts."
   "${CMD_PREVIEW[@]}"
 fi
