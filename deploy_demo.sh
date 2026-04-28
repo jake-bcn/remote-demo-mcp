@@ -6,7 +6,7 @@ set -euo pipefail
 # - $REMOTE_DEMO_MCP_CONFIG if set
 # - otherwise ~/.config/remote-demo-mcp/config.json
 CONFIG_PATH="${REMOTE_DEMO_MCP_CONFIG:-$HOME/.config/remote-demo-mcp/config.json}"
-USE_EXPECT="${USE_EXPECT:-1}"
+USE_EXPECT=0
 
 REMOTE_BASE="/var/www/html/demo-remote"
 PUBLIC_BASE_URL=""
@@ -15,11 +15,16 @@ PUBLIC_BASE_URL=""
 RSYNC_OPTS=(-az --delete)
 
 # ===== Inputs =====
+if [[ "${1:-}" == "--expect" ]]; then
+  USE_EXPECT=1
+  shift
+fi
+
 LOCAL_DIR="${1:-}"
 REMOTE_DIR="${2:-}"
 
 if [[ -z "$LOCAL_DIR" || -z "$REMOTE_DIR" ]]; then
-  echo "Usage: $0 <localDir> <remoteDir>"
+  echo "Usage: $0 [--expect] <localDir> <remoteDir>"
   exit 1
 fi
 
