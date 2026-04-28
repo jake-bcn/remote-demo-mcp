@@ -22,8 +22,13 @@ if [[ -z "$LOCAL_DIR" || -z "$REMOTE_DIR" ]]; then
   exit 1
 fi
 
-if ! command -v jq >/dev/null 2>&1; then
-  echo "jq not found. Install first: brew install jq"
+PYTHON_BIN=""
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN="python3"
+elif command -v python >/dev/null 2>&1; then
+  PYTHON_BIN="python"
+else
+  echo "python/python3 not found. Install Python first."
   exit 1
 fi
 
@@ -32,17 +37,41 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
   exit 1
 fi
 
-DEPLOY_USER="$(jq -r '.deployUser // empty' "$CONFIG_PATH")"
-SSH_HOST="$(jq -r '.ssh.host // empty' "$CONFIG_PATH")"
-SSH_PORT="$(jq -r '.ssh.port // 22' "$CONFIG_PATH")"
-SSH_USER="$(jq -r '.ssh.username // empty' "$CONFIG_PATH")"
-SSH_PASSWORD="$(jq -r '.ssh.password // empty' "$CONFIG_PATH")"
-PUBLIC_BASE_URL="$(jq -r '.publicBaseUrl // empty' "$CONFIG_PATH")"
+CONFIG_ENV="$("$PYTHON_BIN" - "$CONFIG_PATH" <<'PY'
+import json
+import sys
 
-mapfile -t CONFIG_RSYNC_OPTS < <(jq -r '.rsyncOptions[]?' "$CONFIG_PATH")
-if (( ${#CONFIG_RSYNC_OPTS[@]} > 0 )); then
-  RSYNC_OPTS=("${CONFIG_RSYNC_OPTS[@]}")
-fi
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    cfg = json.load(f)
+
+def q(v: str) -> str:
+    return v.replace("\\", "\\\\").replace('"', '\\"')
+
+deploy_user = str(cfg.get("deployUser") or "")
+public_base_url = str(cfg.get("publicBaseUrl") or "")
+ssh = cfg.get("ssh") or {}
+ssh_host = str(ssh.get("host") or "")
+ssh_port = str(ssh.get("port") or 22)
+ssh_user = str(ssh.get("username") or "")
+ssh_password = str(ssh.get("password") or "")
+rsync_opts = cfg.get("rsyncOptions") or []
+if not isinstance(rsync_opts, list):
+    rsync_opts = []
+rsync_opts = [str(x) for x in rsync_opts]
+
+print(f'DEPLOY_USER="{q(deploy_user)}"')
+print(f'PUBLIC_BASE_URL="{q(public_base_url)}"')
+print(f'SSH_HOST="{q(ssh_host)}"')
+print(f'SSH_PORT="{q(ssh_port)}"')
+print(f'SSH_USER="{q(ssh_user)}"')
+print(f'SSH_PASSWORD="{q(ssh_password)}"')
+print("RSYNC_OPTS=()")
+for opt in rsync_opts:
+    print(f'RSYNC_OPTS+=("{q(opt)}")')
+PY
+)"
+eval "$CONFIG_ENV"
 
 if [[ -z "$DEPLOY_USER" || -z "$SSH_HOST" || -z "$SSH_USER" ]]; then
   echo "Invalid config: deployUser / ssh.host / ssh.username cannot be empty"
